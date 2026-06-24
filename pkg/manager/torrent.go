@@ -137,6 +137,15 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 
 	err = m.storage.ForEachBatch(refreshBatchSize, func(batch []*storage.Entry) error {
 		for _, entry := range batch {
+			// Usenet/NZB entries carry a synthetic infohash (e.g. "usenet-torbox-<id>")
+			// and live in the debrid's USENET list, never its torrent list. The torrent
+			// reconcile compares against GetTorrents(), so it would always see them as
+			// "not on remote" and delete them from the mount store — silently breaking
+			// playback mid-stream. They are reconciled via the usenet processing path,
+			// so skip them here entirely.
+			if entry.Protocol == config.ProtocolNZB {
+				continue
+			}
 			cachedInfoHashes[entry.InfoHash] = true
 
 			currentTorrent, onRemote := remoteTorrentsByHash[entry.InfoHash]
