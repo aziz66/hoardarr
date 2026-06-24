@@ -58,6 +58,17 @@ func (f *StreamingFile) ReadAtContext(ctx context.Context, p []byte, off int64) 
 	return n, err
 }
 
+// footerPrefetchSem globally bounds concurrent background footer prefetches.
+// A library scan opens hundreds of files near-simultaneously; without a bound,
+// each open spawns its own 10MB footer-download stream, and the resulting
+// fan-out livelocks the download layer in lock contention (many per-item
+// kickers + stall watchdogs spinning with no real I/O — observed pegging the
+// CPU and hanging the mount after a bulk import + Plex rescan). The acquire is
+// non-blocking (try-acquire): normal playback opens a handful of files and
+// still warms their footers, while a scan burst simply skips prefetch on the
+// overflow — the file is fully readable either way, it just isn't pre-warmed.
+var footerPrefetchSem = make(chan struct{}, 4)
+
 // Prefetch warms a byte range into the cache in the background (best-effort, non
 // blocking). Used on open to pre-fetch the file footer so a media player seeking
 // to the end (FLAC seektable, MP4 moov, MKV cues) hits cache instead of stalling
@@ -67,9 +78,17 @@ func (f *StreamingFile) Prefetch(off, size int64) {
 	if f.closed.Load() || size <= 0 {
 		return
 	}
+	// Non-blocking acquire: cap concurrent prefetches so an open-storm (scan)
+	// can't fan out into hundreds of footer streams. Skip if the budget is full.
+	select {
+	case footerPrefetchSem <- struct{}{}:
+	default:
+		return
+	}
 	item := f.item
 	item.Open() // hold a ref for the duration of the prefetch
 	go func() {
+		defer func() { <-footerPrefetchSem }()
 		defer item.Release()
 		_ = item.Prefetch(context.Background(), off, size)
 	}()
