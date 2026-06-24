@@ -131,6 +131,15 @@ func (tb *Torbox) GetUsenetTorrent(usenetID string) (*types.Torrent, error) {
 		return nil, fmt.Errorf("torbox usenet: download %s not found", usenetID)
 	}
 
+	// TorBox can report download_finished=true (state "processing") before the file
+	// list is enumerated — especially for multi-disc NZBs. Finalizing then would
+	// leave the entry with zero files and an empty symlink folder, so treat
+	// finished-but-empty as still in progress until the files appear.
+	status := tb.getTorboxStatus(data.DownloadState, data.DownloadFinished)
+	if status == types.TorrentStatusDownloaded && len(data.Files) == 0 {
+		status = types.TorrentStatusDownloading
+	}
+
 	t := &types.Torrent{
 		Id:               strconv.Itoa(data.Id),
 		Name:             data.Name,
@@ -138,7 +147,7 @@ func (tb *Torbox) GetUsenetTorrent(usenetID string) (*types.Torrent, error) {
 		Bytes:            data.Size,
 		Size:             data.Size,
 		Progress:         data.Progress * 100,
-		Status:           tb.getTorboxStatus(data.DownloadState, data.DownloadFinished),
+		Status:           status,
 		Speed:            data.DownloadSpeed,
 		Filename:         data.Name,
 		OriginalFilename: data.Name,
