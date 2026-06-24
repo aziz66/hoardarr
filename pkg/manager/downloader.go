@@ -207,8 +207,11 @@ func (d *Downloader) processSymlink(entry *storage.Entry, mountPath string) erro
 		return err
 	}
 
-	// Run ffprobe on files to warm cache and trigger imports
-	if !d.manager.config.SkipPreCache && len(filePaths) > 0 {
+	// Run ffprobe on files to warm cache and trigger imports. Skipped for usenet
+	// entries: their files don't probe cleanly over the mount (ffprobe seeks the
+	// header/footer, which resolves awkwardly via usenet/requestdl) and it's only
+	// for Decypharr's own media-info — the *arr does its own analysis.
+	if !d.manager.config.SkipPreCache && !entry.IsNZB() && len(filePaths) > 0 {
 		probeFiles := filePaths
 		if len(probeFiles) > MaxNZBPreCacheFiles {
 			probeFiles = probeFiles[:MaxNZBPreCacheFiles]

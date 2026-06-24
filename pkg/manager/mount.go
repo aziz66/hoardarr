@@ -11,10 +11,16 @@ import (
 )
 
 const (
-	MaxFFprobeWorkers   = 10
+	MaxFFprobeWorkers   = 4
 	MaxNZBPreCacheFiles = 5
 	FFprobeTimeout      = 60 * time.Second
 )
+
+// ffprobeSem caps the TOTAL number of concurrent ffprobe processes across all
+// RunFFprobe calls. Without it, many entries completing at once (e.g. a large
+// search batch) each spawn their own pool, flooding the box with ffprobe reads
+// over the debrid mount and spiking CPU.
+var ffprobeSem = make(chan struct{}, MaxFFprobeWorkers)
 
 type MountManager interface {
 	Start(ctx context.Context) error
@@ -73,6 +79,10 @@ func (m *Manager) RunFFprobe(filePaths []string) error {
 			continue
 		}
 		p.Go(func() {
+			// Bound total concurrent ffprobe processes globally.
+			ffprobeSem <- struct{}{}
+			defer func() { <-ffprobeSem }()
+
 			ctx, cancel := context.WithTimeout(context.Background(), FFprobeTimeout)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, "ffprobe",
