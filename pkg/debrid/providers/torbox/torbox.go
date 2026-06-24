@@ -481,11 +481,19 @@ func (tb *Torbox) GetDownloadLink(id string, file *types.File) (types.DownloadLi
 func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *types.File) (types.DownloadLink, error) {
 	query := url.Values{}
 	query.Set("token", account.Token)
-	query.Set("torrent_id", id)
 	query.Set("file_id", file.Id)
 	query.Set("redirect", "true")
 
-	downloadURL := fmt.Sprintf("%s/api/torrents/requestdl?%s", tb.Host, query.Encode())
+	// Usenet files resolve via /api/usenet/requestdl (usenet_id), torrents via
+	// /api/torrents/requestdl (torrent_id). Distinguished by the link scheme.
+	var downloadURL string
+	if isUsenetLink(file.Link) {
+		query.Set("usenet_id", id)
+		downloadURL = fmt.Sprintf("%s/api/usenet/requestdl?%s", tb.Host, query.Encode())
+	} else {
+		query.Set("torrent_id", id)
+		downloadURL = fmt.Sprintf("%s/api/torrents/requestdl?%s", tb.Host, query.Encode())
+	}
 
 	now := time.Now()
 

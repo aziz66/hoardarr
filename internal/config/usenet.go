@@ -21,6 +21,13 @@ type UsenetProvider struct {
 // Usenet configuration for usenet streaming and downloading
 type Usenet struct {
 	Providers []UsenetProvider `json:"providers,omitempty"` // Usenet provider configurations
+
+	// Debrid routes NZBs to a debrid provider's usenet service (by name, e.g.
+	// "torbox") instead of the native NNTP engine. When set, NZBs are uploaded to
+	// that debrid, downloaded server-side, and streamed through the debrid mount —
+	// no NNTP subscription or local download needed. Empty = native NNTP.
+	Debrid string `json:"debrid,omitempty"`
+
 	// Per-stream/file configuration
 	MaxConnections int `json:"max_connections,omitempty"` // Maximum concurrent connections per file for parsing and streaming (default: 10)
 	// Read-ahead configuration

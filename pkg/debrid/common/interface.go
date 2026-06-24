@@ -30,3 +30,14 @@ type Client interface {
 	SpeedTest(ctx context.Context) types.SpeedTestResult
 	SupportsCheck() bool
 }
+
+// UsenetClient is an optional capability for providers whose debrid service can
+// download NZBs server-side (e.g. TorBox). A provider implementing it can be the
+// usenet backend via the Usenet.Debrid config. The returned *types.Torrent reuses
+// the torrent entry/mount machinery; its files carry a provider-specific link
+// scheme that GetDownloadLink resolves to the usenet download endpoint.
+type UsenetClient interface {
+	SubmitNZB(name string, content []byte) (usenetID string, err error)
+	GetUsenetTorrent(usenetID string) (*types.Torrent, error)
+	DeleteUsenetDownload(usenetID string) error
+}

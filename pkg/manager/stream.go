@@ -149,12 +149,14 @@ func (m *Manager) Stream(ctx context.Context, entry *storage.Entry, filename str
 		return retry.Unrecoverable(fmt.Errorf("invalid stream range for file %s: %w", filename, err))
 	}
 
-	// Route based on protocol
-	if entry.Protocol == config.ProtocolNZB {
+	// Route based on protocol. Native-NNTP NZBs stream via the usenet engine;
+	// debrid-backed NZBs (ActiveProvider is a debrid, e.g. "torbox") resolve to a
+	// download link and stream over HTTP like torrents.
+	if entry.Protocol == config.ProtocolNZB && entry.ActiveProvider == usenetNativeProvider {
 		return m.streamUsenet(ctx, entry, filename, start, end, writer, onReady)
 	}
 
-	// Default to HTTP streaming for torrents
+	// Default to HTTP streaming for torrents and debrid usenet.
 	return m.streamHTTP(ctx, entry, filename, start, end, writer, onReady)
 }
 

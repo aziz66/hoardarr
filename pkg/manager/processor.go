@@ -108,6 +108,12 @@ func (m *Manager) processQueuedEntries() {
 }
 
 func (m *Manager) processQueuedNZB(entry *storage.Entry) {
+	// Debrid-backed usenet (e.g. TorBox): poll the debrid, not the native engine.
+	if entry.ActiveProvider != "" && entry.ActiveProvider != usenetNativeProvider {
+		m.processQueuedDebridUsenet(entry)
+		return
+	}
+
 	defer m.processingEntries.Delete(entry.InfoHash)
 	// Check if the nzb is already processed
 	metadata, err := m.usenet.GetNZB(entry.InfoHash)
@@ -145,6 +151,47 @@ func (m *Manager) processQueuedNZB(entry *storage.Entry) {
 		_ = m.queue.Update(entry)
 		return
 	}
+}
+
+// processQueuedDebridUsenet polls a debrid usenet download (e.g. TorBox) and, once
+// finished, finalizes it through the same path as a torrent (files + mount).
+func (m *Manager) processQueuedDebridUsenet(entry *storage.Entry) {
+	defer m.processingEntries.Delete(entry.InfoHash)
+
+	placement := entry.GetActiveProvider()
+	if placement == nil {
+		entry.MarkAsError(fmt.Errorf("no active placement found"))
+		_ = m.queue.Update(entry)
+		return
+	}
+
+	client := m.ProviderClient(entry.ActiveProvider)
+	uc, ok := client.(common.UsenetClient)
+	if !ok {
+		entry.MarkAsError(fmt.Errorf("debrid %s does not support usenet", entry.ActiveProvider))
+		_ = m.queue.Update(entry)
+		return
+	}
+
+	t, err := uc.GetUsenetTorrent(placement.ID)
+	if err != nil {
+		m.logger.Error().Err(err).Str("name", entry.Name).Msg("Error checking usenet status")
+		entry.MarkAsError(err)
+		_ = m.queue.Update(entry)
+		return
+	}
+
+	if t.Status == debridTypes.TorrentStatusError {
+		m.logger.Error().Str("debrid", entry.ActiveProvider).Str("name", entry.Name).Msg("Usenet download failed on debrid")
+		entry.MarkAsError(fmt.Errorf("usenet download failed on debrid: %s", entry.ActiveProvider))
+		_ = m.queue.Update(entry)
+		go func() { _ = uc.DeleteUsenetDownload(placement.ID) }()
+		return
+	}
+
+	// Reuse the torrent finalize path: handles downloading-vs-downloaded, populates
+	// files (with the torbox-usenet:// link scheme), and triggers processAction.
+	m.processNewTorrent(entry, t)
 }
 
 func (m *Manager) processQueuedTorrent(entry *storage.Entry) {

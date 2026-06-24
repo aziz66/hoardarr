@@ -8,13 +8,24 @@ import (
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 )
 
+// usenetNativeProvider is the ActiveProvider value for NZBs handled by the native
+// NNTP engine (vs a debrid name like "torbox" for debrid-usenet entries).
+const usenetNativeProvider = "usenet"
+
 // AddNewNZB processes an NZB file and stores it as a storage.Entry
 func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, error) {
+	// Route to a debrid usenet backend (e.g. TorBox) when configured, instead of
+	// the native NNTP engine.
+	if dn := config.Get().Usenet.Debrid; dn != "" {
+		return m.addNZBToDebrid(req, dn)
+	}
+
 	if m.usenet == nil {
 		return "", fmt.Errorf("usenet not configured")
 	}
@@ -69,6 +80,72 @@ func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, er
 	m.logger.Debug().Str("name", entry.Name).Int("queued", m.nzbQueue.Len()).Msg("NZB added to processing queue")
 
 	return meta.ID, nil
+}
+
+// addNZBToDebrid uploads an NZB to a debrid provider's usenet service and queues
+// an entry that's processed/mounted via the debrid (not the native NNTP engine).
+func (m *Manager) addNZBToDebrid(req *ImportRequest, debridName string) (string, error) {
+	client := m.ProviderClient(debridName)
+	if client == nil {
+		return "", fmt.Errorf("usenet debrid %q not found", debridName)
+	}
+	uc, ok := client.(debrid.UsenetClient)
+	if !ok {
+		return "", fmt.Errorf("debrid %q does not support usenet", debridName)
+	}
+
+	m.logger.Info().
+		Str("name", req.Name).
+		Str("category", req.Arr.Name).
+		Str("debrid", debridName).
+		Msg("Adding new NZB to debrid usenet")
+
+	usenetID, err := uc.SubmitNZB(req.Name, req.NZBContent)
+	if err != nil {
+		return "", fmt.Errorf("failed to submit nzb to %s: %w", debridName, err)
+	}
+
+	// Synthetic, unique infohash; the real status/files are fetched on the next
+	// processing tick via GetUsenetTorrent (avoids an add-time API race).
+	infoHash := fmt.Sprintf("usenet-%s-%s", debridName, usenetID)
+	now := time.Now()
+	entry := &storage.Entry{
+		InfoHash:         infoHash,
+		Name:             req.Name,
+		OriginalFilename: req.Name,
+		Protocol:         config.ProtocolNZB,
+		Category:         req.Arr.Name,
+		SavePath:         filepath.Join(req.DownloadFolder, req.Arr.Name),
+		Status:           debridTypes.TorrentStatusDownloading,
+		State:            storage.EntryStateDownloading,
+		Progress:         0,
+		Action:           req.Action,
+		CallbackURL:      req.CallBackUrl,
+		SkipMultiSeason:  req.SkipMultiSeason,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		AddedOn:          now,
+		Providers:        make(map[string]*storage.ProviderEntry),
+		Files:            make(map[string]*storage.File),
+		Tags:             []string{},
+	}
+	entry.ContentPath = entry.DownloadPath()
+
+	// Seed the placement with the usenet download id so the processor can poll it.
+	placeholder := &debridTypes.Torrent{
+		Id:     usenetID,
+		Debrid: debridName,
+		Name:   req.Name,
+		Status: debridTypes.TorrentStatusDownloading,
+		Files:  make(map[string]debridTypes.File),
+	}
+	_ = entry.AddTorrentProvider(placeholder)
+	entry.ActiveProvider = debridName
+
+	if err := m.queue.Add(entry); err != nil {
+		return "", fmt.Errorf("failed to add nzb to queue: %w", err)
+	}
+	return infoHash, nil
 }
 
 func (m *Manager) processNZB(ctx context.Context, entry *storage.Entry, metadata *storage.NZB) error {
