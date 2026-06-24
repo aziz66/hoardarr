@@ -42,6 +42,13 @@ const (
 	// issuing many simultaneous range reads against one file) so download
 	// spawning can't run away and flood the box under a retry storm.
 	maxConcurrentDownloaders = 16
+	// maxGlobalDownloaders bounds total live downloader goroutines across ALL
+	// cache items. The per-item cap stops one file hogging; this stops an
+	// open-storm (a library scan or bulk import touching hundreds of files at
+	// once) from spawning hundreds of downloaders whose per-item kickers + stall
+	// watchdogs then livelock the box on lock contention (CPU pegged, zero real
+	// I/O). Generous enough that normal playback (a few downloaders) never waits.
+	maxGlobalDownloaders = 32
 	// noProgressTimeout is the max time a stream attempt may run without any bytes written.
 	noProgressTimeout = 45 * time.Second
 	// noProgressCheckInterval is how often stall detection checks for forward progress.
@@ -415,13 +422,27 @@ func (dls *Downloaders) kickExistingDownloaderLocked(pos int64) {
 	dl.setMaxOffset(offset) // kick without extending
 }
 
+// globalDownloaderSem enforces maxGlobalDownloaders across every cache item.
+// Buffered channel used as a counting semaphore; acquired non-blocking (we hold
+// dls.mu here, so we must never block) and released when the downloader goroutine
+// exits. If the global budget is full we simply don't spawn now — the waiter
+// stays registered and the kicker retries once a downloader anywhere frees a slot.
+var globalDownloaderSem = make(chan struct{}, maxGlobalDownloaders)
+
 // newDownloaderLocked creates and starts a new downloader
 func (dls *Downloaders) newDownloaderLocked(r ranges.Range, targetEnd int64) error {
-	// Concurrency cap: never let one item's downloader goroutines run away. The
+	// Per-item cap: never let one file's downloader goroutines run away. The
 	// waiter stays registered; the kicker re-tries the spawn on its next pass once
 	// a live downloader finishes and frees a slot. dls.dls is pruned by
 	// removeClosed() before we get here, so len() reflects only live downloaders.
 	if len(dls.dls) >= maxConcurrentDownloaders {
+		return nil
+	}
+	// Global cap: bound total downloaders across ALL items so an open-storm can't
+	// flood the box. Non-blocking (we hold dls.mu); released in the goroutine below.
+	select {
+	case globalDownloaderSem <- struct{}{}:
+	default:
 		return nil
 	}
 	baseChunk := dls.chunkSize
@@ -455,6 +476,7 @@ func (dls *Downloaders) newDownloaderLocked(r ranges.Range, targetEnd int64) err
 	dl.wg.Add(1)
 	go func() {
 		defer dl.wg.Done()
+		defer func() { <-globalDownloaderSem }() // release the global slot
 		defer dls.item.cache.activeDownloads.Add(-1)
 		defer dlCancel() // always release the per-downloader context
 		n, err := dl.run()
