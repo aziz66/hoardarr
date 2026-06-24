@@ -131,12 +131,17 @@ func (tb *Torbox) GetUsenetTorrent(usenetID string) (*types.Torrent, error) {
 		return nil, fmt.Errorf("torbox usenet: download %s not found", usenetID)
 	}
 
-	// TorBox can report download_finished=true (state "processing") before the file
-	// list is enumerated — especially for multi-disc NZBs. Finalizing then would
-	// leave the entry with zero files and an empty symlink folder, so treat
-	// finished-but-empty as still in progress until the files appear.
+	// TorBox sets download_finished=true even on failure (e.g. "failed (RAR files
+	// failed to verify)", "failed (Aborted, cannot be completed)"), and
+	// getTorboxStatus short-circuits finished->Downloaded. Detect failures
+	// explicitly so they error out instead of looping. Otherwise, TorBox can
+	// report finished before the file list is enumerated (esp. multi-disc NZBs);
+	// treat finished-but-empty as still in progress until the files appear (so we
+	// don't finalize with zero files and an empty symlink folder).
 	status := tb.getTorboxStatus(data.DownloadState, data.DownloadFinished)
-	if status == types.TorrentStatusDownloaded && len(data.Files) == 0 {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(data.DownloadState)), "failed") {
+		status = types.TorrentStatusError
+	} else if status == types.TorrentStatusDownloaded && len(data.Files) == 0 {
 		status = types.TorrentStatusDownloading
 	}
 
