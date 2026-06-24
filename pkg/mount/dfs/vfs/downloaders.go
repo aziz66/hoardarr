@@ -31,8 +31,17 @@ const (
 	activeWaiterKickerInterval = 1 * time.Second
 	// idleTimeout is how long before stopping all downloaders due to inactivity
 	idleTimeout = 30 * time.Second
-	// circuitCooldownDuration is how long to block requests after max errors reached
-	circuitCooldownDuration = 20 * time.Minute
+	// circuitCooldownDuration is how long to fail-fast after the breaker trips
+	// before allowing a retry. Kept short on purpose: on a streaming mount a
+	// momentarily dead debrid link must recover in seconds, not lock an album out
+	// for minutes. The lock-free reject path (errCircuitOpen) makes this window
+	// spin-free no matter how hard a player retries during it.
+	circuitCooldownDuration = 30 * time.Second
+	// maxConcurrentDownloaders caps live downloader goroutines per cache item.
+	// Normal playback uses 1-3; this only bounds pathological fan-out (a player
+	// issuing many simultaneous range reads against one file) so download
+	// spawning can't run away and flood the box under a retry storm.
+	maxConcurrentDownloaders = 16
 	// noProgressTimeout is the max time a stream attempt may run without any bytes written.
 	noProgressTimeout = 45 * time.Second
 	// noProgressCheckInterval is how often stall detection checks for forward progress.
@@ -232,14 +241,18 @@ func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, 
 }
 
 // Download blocks until the range r is on disk, or until ctx is canceled.
+// errCircuitOpen is returned, lock-free, while a cache item's download circuit
+// breaker is open. Static on purpose: the hot reject path must never lock dls.mu
+// (e.g. to fetch lastErr), or a read-error storm — a player hammering a
+// momentarily dead debrid link — piles up on the lock and pegs the CPU in futex
+// contention, hanging the whole mount.
+var errCircuitOpen = errors.New("download circuit breaker open (recent backend errors); cooling down")
+
 func (dls *Downloaders) Download(ctx context.Context, r ranges.Range) error {
-	// Circuit breaker: reject immediately if circuit is open
+	// Circuit breaker: reject immediately (and lock-free) if open. isCircuitOpen
+	// is atomic; returning the static error avoids re-locking dls.mu for lastErr.
 	if dls.isCircuitOpen() {
-		lastErr := dls.getLastErr()
-		if lastErr == nil {
-			return errors.New("circuit breaker open, cooldown active")
-		}
-		return fmt.Errorf("circuit breaker open, cooldown active: last error: %w", lastErr)
+		return errCircuitOpen
 	}
 
 	dls.ensureStreamTracked()
@@ -404,6 +417,13 @@ func (dls *Downloaders) kickExistingDownloaderLocked(pos int64) {
 
 // newDownloaderLocked creates and starts a new downloader
 func (dls *Downloaders) newDownloaderLocked(r ranges.Range, targetEnd int64) error {
+	// Concurrency cap: never let one item's downloader goroutines run away. The
+	// waiter stays registered; the kicker re-tries the spawn on its next pass once
+	// a live downloader finishes and frees a slot. dls.dls is pruned by
+	// removeClosed() before we get here, so len() reflects only live downloaders.
+	if len(dls.dls) >= maxConcurrentDownloaders {
+		return nil
+	}
 	baseChunk := dls.chunkSize
 	if baseChunk <= 0 {
 		baseChunk = 4 * 1024 * 1024
