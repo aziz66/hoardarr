@@ -19,8 +19,10 @@ type Fixer struct {
 	// Track re-insertion attempts and failures
 	failedToReinsert   *xsync.Map[string, struct{}]      // infohash:debrid -> failed completely
 	inFlightRepairs    *xsync.Map[string, *FixerRequest] // infohash -> repair request
+	lastReinsertAt     *xsync.Map[string, time.Time]     // infohash -> last re-insertion start (cooldown)
 	providerOrder      []string                          // Order of providers to try (from config)
 	maxReinsertRetries int
+	reinsertCooldown   time.Duration // min interval between re-insertions of the same entry
 }
 
 // FixerRequest tracks an ongoing repair operation
@@ -54,8 +56,10 @@ func NewFixer(manager *Manager) *Fixer {
 		manager:            manager,
 		failedToReinsert:   xsync.NewMap[string, struct{}](),
 		inFlightRepairs:    xsync.NewMap[string, *FixerRequest](),
+		lastReinsertAt:     xsync.NewMap[string, time.Time](),
 		providerOrder:      debridOrder,
-		maxReinsertRetries: 2, // retry each debrid up to 2 times
+		maxReinsertRetries: 2,               // retry each debrid up to 2 times
+		reinsertCooldown:   5 * time.Minute, // suppress re-insert churn on the same entry
 	}
 }
 
@@ -76,6 +80,21 @@ func (f *Fixer) FixTorrent(ctx context.Context, entry *storage.Entry, skipCurren
 			AttemptsCount: 0,
 		}, nil
 	}
+
+	// Per-infohash cooldown. A re-insertion is an expensive SubmitMagnet+CheckStatus
+	// cycle; without a cooldown an entry whose files keep resolving to an empty link
+	// (e.g. a freshly download_uncached torrent that re-inserts but still returns no
+	// link) gets re-inserted on every read attempt — a CPU-burning loop. Suppress
+	// repeat re-insertions of the same entry within the cooldown window.
+	if last, ok := f.lastReinsertAt.Load(entry.InfoHash); ok && time.Since(last) < f.reinsertCooldown {
+		return &FixResult{
+			Success:       false,
+			Error:         fmt.Errorf("re-insertion for %s on cooldown", entry.Name),
+			AttemptsCount: 0,
+		}, nil
+	}
+	f.lastReinsertAt.Store(entry.InfoHash, time.Now())
+
 	// Check if repair is already in flight
 	if req, exists := f.inFlightRepairs.Load(entry.InfoHash); exists {
 		// Wait for existing repair to complete
