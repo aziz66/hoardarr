@@ -70,6 +70,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.logger.Info().
 		Str("mount_path", m.config.MountPath).
 		Str("backend", string(m.defaultBackendType)).
+		Int64("footer_prefetch_bytes", m.config.FooterPrefetchSize).
 		Msg("DFS started successfully")
 	return nil
 }

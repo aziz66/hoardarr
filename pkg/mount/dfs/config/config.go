@@ -22,16 +22,17 @@ type FuseConfig struct {
 	CacheExpiry time.Duration
 
 	// Performance settings
-	ChunkSize     int64
-	ReadAheadSize int64
-	DaemonTimeout time.Duration
+	ChunkSize          int64
+	ReadAheadSize      int64
+	FooterPrefetchSize int64 // bytes of file footer to warm into cache on open (0 = off)
+	DaemonTimeout      time.Duration
 
 	Retries int
 
 	// File system settings
-	UID                uint32
-	GID                uint32
-	Umask              uint32
+	UID   uint32
+	GID   uint32
+	Umask uint32
 }
 
 // DefaultFuseConfig returns a streaming-optimized default configuration
@@ -43,13 +44,14 @@ func DefaultFuseConfig() *FuseConfig {
 		CacheCleanupInterval: 5 * time.Minute,  // More frequent cleanup
 		ChunkSize:            4 * 1024 * 1024,  // 4MB chunk size (balance latency vs throughput)
 		ReadAheadSize:        16 * 1024 * 1024, // 16MB read-ahead (4 chunks prefetch)
+		FooterPrefetchSize:   10 * 1024 * 1024, // warm last 10MB on open (FLAC seektable / mp4 moov)
 
 		Retries: 3,
 
 		// File system defaults
-		UID:                1000,
-		GID:                1000,
-		Umask:              0022,
+		UID:   1000,
+		GID:   1000,
+		Umask: 0022,
 	}
 }
 
@@ -105,6 +107,13 @@ func ParseFuseConfig() *FuseConfig {
 		size, err := parseSize(cfg.ReadAheadSize)
 		if err == nil {
 			fuseConfig.ReadAheadSize = size
+		}
+	}
+
+	if cfg.FooterPrefetchSize != "" {
+		size, err := parseSize(cfg.FooterPrefetchSize)
+		if err == nil {
+			fuseConfig.FooterPrefetchSize = size
 		}
 	}
 	// Otherwise keep the default (4) from DefaultFuseConfig()

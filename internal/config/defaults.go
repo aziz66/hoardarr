@@ -13,10 +13,11 @@ var (
 
 	DefaultRclonePort = "5572"
 
-	DefaultDFSChunkSize     = "8MB"
-	DefaultDFSReadAheadSize = "128MB"
-	DefaultDFSCacheExpiry   = "24h"
-	DefaultDFSDiskCacheSize = "500MB"
+	DefaultDFSChunkSize          = "8MB"
+	DefaultDFSReadAheadSize      = "128MB"
+	DefaultDFSCacheExpiry        = "24h"
+	DefaultDFSDiskCacheSize      = "500MB"
+	DefaultDFSFooterPrefetchSize = "10MB"
 
 	DefaultAccountSyncInterval = "10m"
 	DefaultAvailableSlots      = 100 // This is for providers that does not provide available slots info

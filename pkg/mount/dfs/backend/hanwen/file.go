@@ -79,6 +79,20 @@ func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 			f.logger.Error().Err(err).Str("file", f.info.Name()).Msg("Failed to get reader at open")
 			return nil, 0, syscall.EIO
 		}
+
+		// Warm the file footer into cache so players that seek to the end on open
+		// (FLAC seektable, MP4 moov, MKV cues) hit cache instead of stalling on a
+		// fresh debrid range request — the main cause of music "buffer then skip".
+		if reader != nil && f.config.FooterPrefetchSize > 0 {
+			size := f.info.Size()
+			footer := f.config.FooterPrefetchSize
+			if footer > size {
+				footer = size
+			}
+			if footer > 0 {
+				reader.Prefetch(size-footer, footer)
+			}
+		}
 	}
 
 	fh := &Handle{

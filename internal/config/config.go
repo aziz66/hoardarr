@@ -520,6 +520,9 @@ func (c *Config) setDefaults() {
 		if c.Mount.DFS.DiskCacheSize == "" {
 			c.Mount.DFS.DiskCacheSize = DefaultDFSDiskCacheSize
 		}
+		if c.Mount.DFS.FooterPrefetchSize == "" {
+			c.Mount.DFS.FooterPrefetchSize = DefaultDFSFooterPrefetchSize
+		}
 
 		if c.Mount.DFS.UID == 0 {
 			c.Mount.DFS.UID = uint32(os.Getuid())

@@ -58,6 +58,23 @@ func (f *StreamingFile) ReadAtContext(ctx context.Context, p []byte, off int64) 
 	return n, err
 }
 
+// Prefetch warms a byte range into the cache in the background (best-effort, non
+// blocking). Used on open to pre-fetch the file footer so a media player seeking
+// to the end (FLAC seektable, MP4 moov, MKV cues) hits cache instead of stalling
+// on a fresh debrid range request. It takes its own open reference so the cache
+// item is not evicted mid-prefetch even if the handle closes quickly.
+func (f *StreamingFile) Prefetch(off, size int64) {
+	if f.closed.Load() || size <= 0 {
+		return
+	}
+	item := f.item
+	item.Open() // hold a ref for the duration of the prefetch
+	go func() {
+		defer item.Release()
+		_ = item.Prefetch(context.Background(), off, size)
+	}()
+}
+
 // Size returns the file size
 func (f *StreamingFile) Size() int64 {
 	return f.fileSize

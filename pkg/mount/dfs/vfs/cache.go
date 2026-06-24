@@ -851,6 +851,34 @@ func (item *CacheItem) ReadAtContext(ctx context.Context, p []byte, off int64) (
 	return n, err
 }
 
+// Prefetch schedules a byte range for download into the cache without copying
+// any data back to the caller. Used to warm a file's footer/header on open so a
+// later seek there (e.g. a media player reading the FLAC seektable / MP4 moov)
+// is a cache hit instead of a fresh debrid range request that stalls playback.
+//
+// It blocks until the range is downloaded (or ctx is cancelled), so callers
+// should run it in a goroutine. Reads near EOF are clipped by the downloader's
+// read-ahead extension, so this fetches roughly the requested range, not more.
+func (item *CacheItem) Prefetch(ctx context.Context, off, size int64) error {
+	if size <= 0 || off < 0 || off >= item.info.Size {
+		return nil
+	}
+	if off+size > item.info.Size {
+		size = item.info.Size - off
+	}
+	r := ranges.Range{Pos: off, Size: size}
+	if item.HasRange(r) {
+		return nil
+	}
+	item.dlMu.Lock()
+	dls := item.downloaders
+	item.dlMu.Unlock()
+	if dls == nil {
+		return errors.New("downloaders closed")
+	}
+	return dls.Download(ctx, r)
+}
+
 // WriteAtNoOverwrite writes only bytes not already present
 func (item *CacheItem) WriteAtNoOverwrite(p []byte, off int64) (n, skipped int, err error) {
 	writeRange := ranges.Range{Pos: off, Size: int64(len(p))}

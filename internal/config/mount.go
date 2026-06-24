@@ -59,12 +59,19 @@ type DFS struct {
 	ChunkSize     string `json:"chunk_size,omitempty"`      // Initial chunk size, e.g 10MB
 	ReadAheadSize string `json:"read_ahead_size,omitempty"` // Read ahead size (deprecated, use MaxChunkSize)
 
+	// FooterPrefetchSize warms the last N bytes of a media file into cache on
+	// open (e.g "10MB"). Media players (FLAC seektable, MP4 moov, MKV cues) seek
+	// to the file footer before/while playing; without this the seek triggers a
+	// fresh debrid range request and stalls playback. "0" disables. Inspired by
+	// riven-ts's header/footer-aware VFS.
+	FooterPrefetchSize string `json:"footer_prefetch_size,omitempty"`
+
 	DaemonTimeout string `json:"daemon_timeout,omitempty"` // Time after which the FUSE daemon will exit if idle
 
 	// File system settings
-	UID                uint32 `json:"uid,omitempty"`                 // User ID for mounted files
-	GID                uint32 `json:"gid,omitempty"`                 // Group ID for mounted files
-	Umask              string `json:"umask,omitempty"`               // File permissions mask
+	UID   uint32 `json:"uid,omitempty"`   // User ID for mounted files
+	GID   uint32 `json:"gid,omitempty"`   // Group ID for mounted files
+	Umask string `json:"umask,omitempty"` // File permissions mask
 }
 
 type ExternalRclone struct {
@@ -92,6 +99,9 @@ func (c *Config) applyMountEnvVars() {
 	}
 	if val := getEnv("MOUNT__DFS__READ_AHEAD_SIZE"); val != "" {
 		c.Mount.DFS.ReadAheadSize = val
+	}
+	if val := getEnv("MOUNT__DFS__FOOTER_PREFETCH_SIZE"); val != "" {
+		c.Mount.DFS.FooterPrefetchSize = val
 	}
 	if val := getEnv("MOUNT__DFS__CACHE_EXPIRY"); val != "" {
 		c.Mount.DFS.CacheExpiry = val
