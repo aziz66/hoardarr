@@ -1,3 +1,21 @@
+# Hoarder
+
+> **Hoarder** is a fork of [Decypharr](https://github.com/sirrobot01/decypharr) by **sirrobot01**,
+> converted into a **download-to-disk** debrid client for the *arr apps. Instead of streaming from a
+> FUSE mount, it downloads **owned files to local storage** (torrent + usenet; multi-provider:
+> TorBox / Real-Debrid / Premiumize). The app/binary is **`hoardarr`**.
+>
+> **What differs from upstream Decypharr:**
+> - The FUSE/streaming mount layer (`pkg/mount/*`) is **removed** — Hoarder writes real files to disk
+>   for any *arr (Lidarr/Radarr/Sonarr) to import. Default action is `download`.
+> - TorBox usenet is fetched over HTTP (no separate NNTP provider required).
+> - **Path-preserving** multi-folder/multi-disc downloads, single-HDD tuning, and correctness/security
+>   hardening from two adversarial audit passes (path traversal, data races, link-expiry, etc.).
+>
+> Full credit for the original architecture goes to upstream Decypharr. The original README follows.
+
+---
+
 # Decypharr
 
 ![ui](docs/src/assets/images/index.png)
