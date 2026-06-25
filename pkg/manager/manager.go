@@ -132,8 +132,11 @@ func New() *Manager {
 	}
 
 	streamClient := &http.Client{
-		Timeout:   0,
-		Transport: transport,
+		Timeout: 0,
+		// Rate-limit + transparently retry 429s for debrid hosts (TorBox 300/min), so a
+		// rate limit pauses-and-resumes the link/download instead of failing it (which
+		// the *arr would blacklist). Covers the validation HEAD and the grab download GET.
+		Transport: newRateLimitTransport(transport),
 	}
 
 	usenetTimeout, err := utils.ParseDuration(cfg.Usenet.ProcessingTimeout)
