@@ -165,7 +165,19 @@ func (q *Queue) wrapCleanupWithFileDelete(cleanup func(t *storage.Entry) error) 
 }
 
 func (q *Queue) Delete(infohash string, cleanup func(t *storage.Entry) error) error {
-	return q.storage.DeleteQueued(infohash, q.wrapCleanupWithFileDelete(cleanup))
+	// Default keeps the historical behavior (remove the on-disk files too).
+	return q.DeleteRecord(infohash, true, cleanup)
+}
+
+// DeleteRecord removes a queue entry, deleting the downloaded files only when
+// deleteFiles is true. This lets the qBittorrent torrents/delete handler honor the
+// client's deleteFiles flag (download-to-disk means DownloadPath() is the REAL files,
+// so a blind delete could remove the user's only copy when the *arr asked to keep it).
+func (q *Queue) DeleteRecord(infohash string, deleteFiles bool, cleanup func(t *storage.Entry) error) error {
+	if deleteFiles {
+		cleanup = q.wrapCleanupWithFileDelete(cleanup)
+	}
+	return q.storage.DeleteQueued(infohash, cleanup)
 }
 
 func (q *Queue) DeleteWhere(category string, protocol config.Protocol, state storage.TorrentState, hashes []string, cleanup func(t *storage.Entry) error) error {

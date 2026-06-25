@@ -40,6 +40,29 @@ func RemoveInvalidChars(value string) string {
 	}, value)
 }
 
+// SafeJoin joins an untrusted relative path onto base, preserving subdirectories but
+// guaranteeing the result stays inside base (any "../" that would escape is dropped).
+// Anchoring with a leading "/" before Clean collapses leading "../" segments.
+func SafeJoin(base, rel string) string {
+	cleaned := filepath.Clean("/" + filepath.ToSlash(rel))
+	return filepath.Join(base, filepath.FromSlash(cleaned))
+}
+
+// SafePathName reduces an untrusted name (torrent/NZB display name, debrid-returned
+// name, uploaded filename) to a SINGLE safe path segment that cannot traverse outside
+// its parent directory. It collapses path separators and leading dots so "..", "/etc",
+// "..\\x" can never escape the intended download folder.
+func SafePathName(value string) string {
+	value = strings.ReplaceAll(value, "\\", "/")
+	value = strings.ReplaceAll(value, "/", "_")
+	value = strings.TrimSpace(value)
+	value = strings.TrimLeft(value, ".") // ".."/"."/leading-dot can't hide or escape
+	if value == "" {
+		return "download"
+	}
+	return value
+}
+
 func RemoveExtension(value string) string {
 	ext := filepath.Ext(value)
 	if ext == "" {

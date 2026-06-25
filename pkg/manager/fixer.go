@@ -313,15 +313,17 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 		entry.Files = make(map[string]*storage.File)
 	}
 	for _, f := range newDebridTorrent.GetFiles() {
-		if existing, exists := entry.Files[f.Name]; exists {
+		if existing, exists := entry.Files[f.Key()]; exists {
+			existing.Path = f.Path
 			existing.Size = f.Size
 			existing.ByteRange = f.ByteRange
 			existing.Deleted = false
 			existing.InfoHash = entry.InfoHash
 			existing.AddedOn = addedOn
 		} else {
-			entry.Files[f.Name] = &storage.File{
+			entry.Files[f.Key()] = &storage.File{
 				Name:      f.Name,
+				Path:      f.Path,
 				Size:      f.Size,
 				ByteRange: f.ByteRange,
 				Deleted:   false,

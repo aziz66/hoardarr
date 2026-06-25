@@ -281,7 +281,7 @@ func (p *Premiumize) walkFolder(folderId, prefix string, files map[string]types.
 		if link == "" {
 			link = "premiumize://" + it.Id
 		}
-		files[fileName] = types.File{
+		file := types.File{
 			TorrentId: torrentId,
 			Id:        it.Id,
 			Name:      fileName,
@@ -289,6 +289,7 @@ func (p *Premiumize) walkFolder(folderId, prefix string, files map[string]types.
 			Path:      relPath,
 			Link:      link,
 		}
+		files[file.Key()] = file
 	}
 	return nil
 }
@@ -319,7 +320,7 @@ func (p *Premiumize) collectFiles(torrentId, folderId, fileId string) (map[strin
 			if link == "" {
 				link = "premiumize://" + data.Id
 			}
-			files[fileName] = types.File{
+			file := types.File{
 				TorrentId: torrentId,
 				Id:        data.Id,
 				Name:      fileName,
@@ -327,6 +328,7 @@ func (p *Premiumize) collectFiles(torrentId, folderId, fileId string) (map[strin
 				Path:      data.Name,
 				Link:      link,
 			}
+			files[file.Key()] = file
 		}
 	}
 

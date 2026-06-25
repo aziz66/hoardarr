@@ -13,9 +13,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/manager"
-	"github.com/sirrobot01/decypharr/pkg/mount/dfs"
-	"github.com/sirrobot01/decypharr/pkg/mount/external"
-	"github.com/sirrobot01/decypharr/pkg/mount/rclone"
 	"github.com/sirrobot01/decypharr/pkg/server"
 	"github.com/sirrobot01/decypharr/pkg/version"
 )
@@ -54,19 +51,17 @@ func Start(ctx context.Context) error {
 		// ascii banner
 		fmt.Printf(`
 +-------------------------------------------------------+
-|                                                       |
-|  ╔╦╗╔═╗╔═╗╦ ╦╔═╗╦ ╦╔═╗╦═╗╦═╗                          |
-|   ║║║╣ ║  └┬┘╠═╝╠═╣╠═╣╠╦╝╠╦╝ (%s)        |
-|  ═╩╝╚═╝╚═╝ ┴ ╩  ╩ ╩╩ ╩╩╚═╩╚═                          |
-|                                                       |
-+-------------------------------------------------------+
-|  Log Level: %s                                        |
+|  ╦ ╦╔═╗╔═╗╦═╗╔╦╗╔═╗╦═╗╦═╗                             |
+|  ╠═╣║ ║╠═╣╠╦╝ ║║╠═╣╠╦╝╠╦╝  (%s)
+|  ╩ ╩╚═╝╩ ╩╩╚══╩╝╩ ╩╩╚═╩╚═                             |
+|  debrid download-to-disk client for *arr apps         |
+|  Log Level: %s
 +-------------------------------------------------------+
 `, version.GetInfo(), cfg.LogLevel)
 
-		// Initialize services
-		mountMgr := createMountManager(mgr, cfg)
-		mgr.SetMountManager(mountMgr)
+		// Initialize services. The FUSE/streaming mount layer has been removed —
+		// this is a download-to-disk client, so the mount manager is always a no-op stub.
+		mgr.SetMountManager(manager.NewStubMountManager())
 		srv := server.New(mgr)
 
 		srv.SetRestartFunc(restartFunc)
@@ -119,19 +114,6 @@ func Start(ctx context.Context) error {
 			// rebuild svcCtx off the original parent
 			svcCtx, cancelSvc = context.WithCancel(ctx)
 		}
-	}
-}
-
-func createMountManager(mgr *manager.Manager, cfg *config.Config) manager.MountManager {
-	switch cfg.Mount.Type {
-	case config.MountTypeRclone:
-		return rclone.NewManager(mgr)
-	case config.MountTypeDFS:
-		return dfs.NewManager(mgr)
-	case config.MountTypeExternalRclone:
-		return external.NewManager(mgr)
-	default:
-		return manager.NewStubMountManager()
 	}
 }
 

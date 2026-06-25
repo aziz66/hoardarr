@@ -108,6 +108,16 @@ type File struct {
 	DownloadLink DownloadLink `json:"-"`
 }
 
+// Key returns the unique map key / lookup identity for this file: the full relative
+// path when available (so files with the same basename in different subfolders don't
+// collide), falling back to the basename for providers that don't expose a path.
+func (f File) Key() string {
+	if f.Path != "" {
+		return f.Path
+	}
+	return f.Name
+}
+
 func (t *Torrent) Cleanup(remove bool) {
 	if remove {
 		err := os.Remove(t.Filename)
@@ -168,6 +178,12 @@ func (dl *DownloadLink) Valid() error {
 	// Validate url format
 	if !utils.IsValidURL(dl.DownloadLink) {
 		return InvalidDownloadLinkError
+	}
+
+	// Treat a link past its expiry as invalid so the cache regenerates it instead of
+	// handing back a dead URL (TorBox/RealDebrid stamp ExpiresAt; zero == no expiry info).
+	if !dl.ExpiresAt.IsZero() && time.Now().After(dl.ExpiresAt) {
+		return DownloadLinkExpiredError
 	}
 
 	return nil

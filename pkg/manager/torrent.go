@@ -386,11 +386,14 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
 		}
 	}
 
-	// Populate global Files metadata (only if empty)
+	// Populate global Files metadata (only if empty). Key by f.Key() and carry Path so
+	// multi-folder files don't collide and this map agrees with the placement map
+	// (AddTorrentProvider also keys by f.Key()).
 	if len(mt.Files) == 0 {
 		for _, f := range t.GetFiles() {
-			mt.Files[f.Name] = &storage.File{
+			mt.Files[f.Key()] = &storage.File{
 				Name:      f.Name,
+				Path:      f.Path,
 				Size:      f.Size,
 				ByteRange: f.ByteRange,
 				Deleted:   f.Deleted,

@@ -301,7 +301,7 @@ func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) *Provider
 	}
 
 	for _, f := range debridTorrent.GetFiles() {
-		providerEntry.Files[f.Name] = &ProviderFile{
+		providerEntry.Files[f.Key()] = &ProviderFile{
 			Id:   f.Id,
 			Link: f.Link,
 			Path: f.Path,
@@ -420,11 +420,32 @@ func (e *Entry) MarkAsError(err error) {
 	e.UpdatedAt = now
 }
 
+// Key returns the unique map key / lookup identity for this file: the full relative
+// path when available, falling back to the basename. Must match debridTypes.File.Key.
+func (f *File) Key() string {
+	if f.Path != "" {
+		return f.Path
+	}
+	return f.Name
+}
+
 func (e *Entry) GetFile(filename string) (*File, error) {
 	if e.Files == nil {
 		return nil, fmt.Errorf("failed to get entry file, files is nil")
 	}
 	f, exists := e.Files[filename]
+	if !exists {
+		// Files are keyed by full relative path now; callers that only know the basename
+		// (e.g. WebDAV/stream) fall back to a basename scan.
+		base := filepath.Base(filename)
+		for _, candidate := range e.Files {
+			if candidate.Name == base || filepath.Base(candidate.Key()) == base {
+				f = candidate
+				exists = true
+				break
+			}
+		}
+	}
 	if !exists {
 		return nil, fmt.Errorf("failed to get entry file, file not found")
 	}
@@ -457,7 +478,7 @@ func (e *Entry) RunChecks() (bool, error) {
 		if f.Deleted {
 			continue
 		}
-		pf, exists := activeProvider.Files[f.Name]
+		pf, exists := activeProvider.Files[f.Key()]
 		if !exists {
 			return true, fmt.Errorf("file %s missing in active providerEntry", f.Name) // need to refresh
 		}
@@ -503,9 +524,11 @@ func (e *Entry) IsValid() bool {
 	return activePlacement.IsValid()
 }
 
-// DownloadPath returns the expected download/symlink path for this entry
+// DownloadPath returns the expected download path for this entry. The entry name is
+// untrusted (magnet &dn=, uploaded filename, debrid-returned name), so it is reduced to
+// a single safe segment that cannot traverse outside SavePath.
 func (e *Entry) DownloadPath() string {
-	return filepath.Join(e.SavePath, utils.RemoveExtension(e.Name))
+	return filepath.Join(e.SavePath, utils.SafePathName(utils.RemoveExtension(e.Name)))
 }
 
 // SwitcherJob tracks the progress of a migration operation
@@ -607,15 +630,17 @@ func (ct *CachedTorrent) ToManagedTorrent() *Entry {
 		Files:            make(map[string]*File),
 	}
 
-	for name, f := range ct.Files {
-		mt.Files[name] = &File{
+	for _, f := range ct.Files {
+		nf := &File{
 			Name:      f.Name,
+			Path:      f.Path,
 			Size:      f.Size,
 			ByteRange: f.ByteRange,
 			InfoHash:  ct.InfoHash, // Track which torrent this file came from
 			Deleted:   f.Deleted,
 			AddedOn:   addedOn,
 		}
+		mt.Files[nf.Key()] = nf
 	}
 
 	// Set magnet if present
@@ -644,7 +669,7 @@ func (ct *CachedTorrent) ToManagedTorrent() *Entry {
 
 		// Populate providerEntry files from cached torrent
 		for _, f := range ct.Files {
-			providerEntry.Files[f.Name] = &ProviderFile{
+			providerEntry.Files[f.Key()] = &ProviderFile{
 				Id:   f.Id,
 				Link: f.Link,
 				Path: f.Path,

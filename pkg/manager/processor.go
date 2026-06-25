@@ -286,6 +286,11 @@ func (m *Manager) processQueuedTorrent(entry *storage.Entry) {
 
 func (m *Manager) processAction(entry *storage.Entry) {
 	entry.Status = debridTypes.TorrentStatusDownloaded
+	// Claim the entry up front: persisting IsDownloading=true here (before the async
+	// download starts) closes the window where a concurrent processQueuedEntries tick
+	// could re-select this hash — the scheduler skips entries with IsDownloading=true —
+	// and start a second download pool writing the same files.
+	entry.IsDownloading = true
 	entry.UpdatedAt = time.Now()
 	_ = m.queue.Update(entry)
 	m.logger.Info().
@@ -308,10 +313,10 @@ func (m *Manager) processAction(entry *storage.Entry) {
 	}
 	err := m.downloader.download(entry)
 	if err != nil {
-		m.logger.Error().
-			Err(err).
-			Str("name", entry.Name).
-			Msg("Error running post-download action")
+		// Mark the entry errored (resets IsDownloading, sets State=Error, notifies) so a
+		// failed download leaves the in-flight set instead of being stuck forever with
+		// IsDownloading=true (which the scheduler skips). Covers torrent + debrid-usenet.
+		m.downloader.markAsError(entry, err)
 		return
 	}
 }
@@ -334,13 +339,14 @@ func (m *Manager) processNewTorrent(torrent *storage.Entry, debridTorrent *debri
 	for _, file := range debridTorrent.Files {
 		tFile := &storage.File{
 			Name:      file.Name,
+			Path:      file.Path,
 			Size:      file.Size,
 			ByteRange: file.ByteRange,
 			Deleted:   file.Deleted,
 			InfoHash:  torrent.InfoHash,
 			AddedOn:   torrent.AddedOn,
 		}
-		torrent.Files[file.Name] = tFile
+		torrent.Files[file.Key()] = tFile
 	}
 	_ = m.queue.Update(torrent)
 

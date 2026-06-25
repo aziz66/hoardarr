@@ -58,7 +58,7 @@ chmod 755 /app
 touch /app/logs/decypharr.log
 chmod 666 /app/logs/decypharr.log
 
-# Export for rclone/fuse
+# Export USER/HOME for the app
 export USER="$USERNAME"
 export HOME="/app"
 

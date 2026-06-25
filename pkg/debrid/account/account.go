@@ -48,18 +48,19 @@ func (a *Account) sliceFileLink(fileLink string) string {
 
 func (a *Account) GetDownloadLink(id string, file *types.File, fetcher LinkFetcher) (types.DownloadLink, error) {
 	slicedLink := a.sliceFileLink(file.Link)
-	dl, ok := a.links.Load(slicedLink)
-	if !ok {
-		var err error
-		dl, err = fetcher(a, id, file)
-		if err != nil {
-			return dl, err
-		}
-		a.storeLink(dl)
+	// Return a cached link only if it's still valid (Valid() now rejects expired links).
+	if dl, ok := a.links.Load(slicedLink); ok && dl.Valid() == nil {
+		return dl, nil
+	}
+	// Not cached, or cached link invalid/expired — fetch a fresh one and validate it.
+	dl, err := fetcher(a, id, file)
+	if err != nil {
+		return dl, err
 	}
 	if err := dl.Valid(); err != nil {
 		return types.DownloadLink{}, err
 	}
+	a.storeLink(dl)
 	return dl, nil
 }
 
@@ -87,14 +88,26 @@ func (a *Account) DownloadLinksCount() int {
 func (a *Account) GetRandomLink() (types.DownloadLink, bool) {
 	var result types.DownloadLink
 	found := false
+	// Prefer a still-valid (non-expired) link so a speed test doesn't probe a dead URL.
 	a.links.Range(func(_ string, link types.DownloadLink) bool {
-		if !link.Empty() {
+		if link.Valid() == nil {
 			result = link
 			found = true
 			return false // stop iteration
 		}
 		return true
 	})
+	if !found {
+		// Fall back to any non-empty link so the speed test still runs on a stale cache.
+		a.links.Range(func(_ string, link types.DownloadLink) bool {
+			if !link.Empty() {
+				result = link
+				found = true
+				return false
+			}
+			return true
+		})
+	}
 	return result, found
 }
 

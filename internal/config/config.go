@@ -323,7 +323,8 @@ func (c *Config) SaveAuth(auth *Auth) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.AuthFile(), data, 0644)
+	// 0600: auth.json holds credentials — keep it owner-only.
+	return os.WriteFile(c.AuthFile(), data, 0600)
 }
 
 func (c *Config) NeedsAuth() bool {
@@ -352,6 +353,11 @@ func (c *Config) migrateQBitTorrentToManager() {
 
 	if c.MaxDownloads == 0 && c.QBitTorrent.MaxDownloads > 0 {
 		c.MaxDownloads = c.QBitTorrent.MaxDownloads
+	}
+	if c.MaxDownloads <= 0 {
+		// Always bound the per-entry download pool, even for config/env installs that
+		// skip the setup wizard, so a multi-file entry can't spawn unbounded goroutines.
+		c.MaxDownloads = 4
 	}
 
 	if !c.AlwaysRmTrackerUrls && c.QBitTorrent.AlwaysRmTrackerUrls {
@@ -401,7 +407,9 @@ func (c *Config) setDefaults() {
 	c.migrateNotifications()
 
 	if c.DefaultDownloadAction == "" {
-		c.DefaultDownloadAction = DownloadActionSymlink
+		// This is a download-to-disk fork (the FUSE/symlink mount layer was removed),
+		// so default to downloading rather than symlinking into a mount that no longer exists.
+		c.DefaultDownloadAction = DownloadActionDownload
 	}
 
 	for i, debrid := range c.Debrids {
@@ -586,7 +594,8 @@ func (c *Config) Save() error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(c.JsonFile(), data, 0644); err != nil {
+	// 0600: config.json holds plaintext debrid API keys — keep it owner-only.
+	if err := os.WriteFile(c.JsonFile(), data, 0600); err != nil {
 		fmt.Printf("Failed to write config file: %v\n", err)
 		return err
 	}

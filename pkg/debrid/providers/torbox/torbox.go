@@ -330,7 +330,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 			file.Link = fmt.Sprintf("torbox://%s/%d", t.Id, f.Id)
 		}
 
-		t.Files[fileName] = file
+		t.Files[file.Key()] = file
 	}
 	var cleanPath string
 	if len(t.Files) > 0 {
@@ -420,7 +420,7 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 			file.Link = fmt.Sprintf("torbox://%s/%s", t.Id, strconv.Itoa(f.Id))
 		}
 
-		t.Files[fileName] = file
+		t.Files[file.Key()] = file
 	}
 
 	var cleanPath string
@@ -583,7 +583,7 @@ func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
 				file.Link = fmt.Sprintf("torbox://%s/%d", t.Id, f.Id)
 			}
 
-			t.Files[fileName] = file
+			t.Files[file.Key()] = file
 		}
 
 		var cleanPath string

@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -11,11 +12,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	grab "github.com/cavaliergopher/grab/v3"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/notifications"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sourcegraph/conc/pool"
@@ -28,6 +31,42 @@ type Downloader struct {
 	dest         string
 	logger       zerolog.Logger
 	maxDownloads int
+	grabClient   *grab.Client
+}
+
+const (
+	// maxDownloadAttempts bounds how many times a single file download is retried.
+	// Debrid links expire (~48h); a large file on a slow HDD can outlive one, so on
+	// failure we re-resolve the link (linkService repairs/re-resolves) and retry.
+	maxDownloadAttempts = 3
+	// globalMaxDownloads caps the TOTAL concurrent file downloads across ALL entries.
+	// max_downloads bounds concurrency per entry, but bulk imports spawn one pool per
+	// entry, so without a global cap N entries × max_downloads writers can flood the
+	// disk. Tuned for a single spinning HDD: too many concurrent sequential writers
+	// seek-thrash the head and collapse throughput, so keep this low (~3).
+	globalMaxDownloads = 3
+	// progressPersistInterval throttles how often an in-flight download's progress is
+	// marshalled + appended to the queue store (the in-memory entry stays current for
+	// the API; only disk persistence is rate-limited).
+	progressPersistInterval = 3 * time.Second
+	// downloadStallTimeout aborts a download attempt whose byte count has not advanced
+	// for this long. The pooled HTTP client has no overall timeout (large files), so a
+	// half-open debrid/CDN connection would otherwise hang a goroutine forever while
+	// holding a globalDownloadSem slot — 8 such stalls would freeze ALL downloads. On
+	// stall we cancel the attempt so the retry loop can re-resolve and try again.
+	downloadStallTimeout = 90 * time.Second
+)
+
+// globalDownloadSem bounds total concurrent file downloads process-wide.
+var globalDownloadSem = make(chan struct{}, globalMaxDownloads)
+
+// downloadRetryBackoff returns an exponential backoff capped at 15s.
+func downloadRetryBackoff(attempt int) time.Duration {
+	d := time.Duration(1<<uint(attempt)) * time.Second
+	if d > 15*time.Second {
+		d = 15 * time.Second
+	}
+	return d
 }
 
 const (
@@ -72,6 +111,10 @@ func NewDownloadManager(manager *Manager) *Downloader {
 		logger:       manager.logger.With().Str("component", "downloader").Logger(),
 		dest:         cfg.DownloadFolder,
 		maxDownloads: cfg.MaxDownloads,
+		// One grab.Client reused across all downloads (it's safe for concurrent use);
+		// avoids allocating a throwaway http.Client+Transport per file. The actual
+		// transport/keepalive pooling comes from the shared streamClient.
+		grabClient: &grab.Client{HTTPClient: manager.streamClient, BufferSize: 1 << 20},
 	}
 }
 
@@ -87,7 +130,11 @@ func (d *Downloader) download(torrent *storage.Entry) error {
 		isMultiSeason bool
 		seasons       []SeasonInfo
 	)
-	if !torrent.SkipMultiSeason {
+	// Multi-season fan-out splits a pack into per-season entries under SYNTHETIC hashes.
+	// That only works for the symlink/mount model; in download-to-disk mode the *arr polls
+	// the ORIGINAL grabbed hash, so splitting leaves that hash pointing at an empty folder
+	// and import fails. Download the whole pack under the grabbed hash instead.
+	if !torrent.SkipMultiSeason && torrent.Action != config.DownloadActionDownload {
 		isMultiSeason, seasons = d.detectMultiSeason(torrent)
 	}
 	torrentMountPath := d.manager.GetTorrentMountPath(torrent)
@@ -124,7 +171,11 @@ func (d *Downloader) process(entry *storage.Entry, mountPath string) error {
 		_ = d.manager.queue.Delete(entry.InfoHash, nil)
 		return nil
 	default:
-		return d.processSymlink(entry, mountPath)
+		// This is a download-to-disk client; the FUSE mount that processSymlink/
+		// processStrm depend on no longer exists. Any unknown/empty action (e.g. a
+		// queued entry persisted from a prior symlink-mode run, or config drift)
+		// must download to disk, not block 30 min waiting for mount files.
+		return d.processDownload(entry)
 	}
 }
 
@@ -466,8 +517,10 @@ func limitedStringSample(values []string, limit int) []string {
 // For torrents: uses HTTP download from debrid
 // For NZBs: uses parallel NNTP segment download
 func (d *Downloader) processDownload(entry *storage.Entry) error {
-	// Check if this is a usenet entry
-	if entry.IsNZB() {
+	// Native NNTP entries (ActiveProvider == "usenet") need the NNTP engine.
+	// Debrid-usenet (e.g. TorBox: ActiveProvider == "torbox") resolves to an
+	// HTTPS link via linkService just like torrents, so download it over HTTP.
+	if entry.IsNZB() && entry.ActiveProvider == usenetNativeProvider {
 		return d.processUsenetDownload(entry)
 	}
 	return d.processTorrentDownload(entry)
@@ -491,19 +544,37 @@ func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
 	entry.Progress = 0
 
 	var progressMu sync.Mutex
-	progressCallback := func(downloaded int64, speed int64) {
-		progressMu.Lock()
-		defer progressMu.Unlock()
+	// Track per-file absolute bytes-on-disk so progress stays correct across retries
+	// and grab resumes: localDownloader reports the CUMULATIVE bytes for a file, and we
+	// add only the delta vs that file's previous value. Without this, a resumed retry
+	// re-adds the already-counted prefix and Progress can exceed 1.0.
+	fileProgress := make(map[string]int64)
+	var lastPersist time.Time
+	progressFor := func(name string) func(int64, int64) {
+		return func(absolute int64, speed int64) {
+			progressMu.Lock()
+			defer progressMu.Unlock()
 
-		entry.SizeDownloaded += downloaded
-		entry.Speed = speed
-		if totalSize > 0 {
-			entry.Progress = float64(entry.SizeDownloaded) / float64(totalSize)
+			prev := fileProgress[name]
+			fileProgress[name] = absolute
+			entry.SizeDownloaded += absolute - prev
+			entry.Speed = speed
+			if totalSize > 0 {
+				entry.Progress = float64(entry.SizeDownloaded) / float64(totalSize)
+			}
+			entry.UpdatedAt = time.Now()
+			// Throttle persistence: the in-memory entry stays live, but we only marshal
+			// + append the whole entry to the queue store at most every few seconds. At
+			// 500ms ticks × N concurrent files this otherwise re-serializes the entire
+			// entry ~6×/s and inflates the append-log (forcing frequent compaction).
+			if time.Since(lastPersist) >= progressPersistInterval {
+				lastPersist = time.Now()
+				_ = d.manager.queue.Update(entry)
+			}
 		}
-		entry.UpdatedAt = time.Now()
-		_ = d.manager.queue.Update(entry)
 	}
 
+	ctx := d.operationContext()
 	// Resolve download links before spawning goroutines
 	type downloadTask struct {
 		file *storage.File
@@ -511,9 +582,9 @@ func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
 	}
 	var tasks []downloadTask
 	for _, file := range files {
-		downloadLink, err := d.manager.linkService.GetLink(context.Background(), entry, file.Name)
+		downloadLink, err := d.manager.linkService.GetLink(ctx, entry, file.Key())
 		if err != nil {
-			d.logger.Error().Msgf("Failed to get download link for %s: %v", file.Name, err)
+			d.logger.Error().Msgf("Failed to get download link for %s: %v", file.Key(), err)
 			continue
 		}
 		tasks = append(tasks, downloadTask{file: file, link: downloadLink.DownloadLink})
@@ -530,16 +601,27 @@ func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
 	}
 	for _, task := range tasks {
 		p.Go(func() error {
-			if err := d.localDownloader(
+			// Preserve subfolders (e.g. CD1/01.flac) while preventing traversal, and
+			// create the per-file parent dirs (MkdirAll above only made the root folder).
+			rel := task.file.Path
+			if rel == "" {
+				rel = task.file.Name
+			}
+			destPath := utils.SafeJoin(downloadedFolder, rel)
+			if err := os.MkdirAll(filepath.Dir(destPath), os.ModePerm); err != nil {
+				return fmt.Errorf("failed to create directory for %s: %w", task.file.Key(), err)
+			}
+			if err := d.downloadFileWithRetry(
+				entry,
+				task.file,
 				task.link,
-				filepath.Join(downloadedFolder, task.file.Name),
-				task.file.ByteRange,
-				progressCallback,
+				destPath,
+				progressFor(task.file.Key()),
 			); err != nil {
-				d.logger.Error().Msgf("Failed to download %s: %v", task.file.Name, err)
+				d.logger.Error().Msgf("Failed to download %s: %v", task.file.Key(), err)
 				return err
 			}
-			d.logger.Info().Msgf("Downloaded %s", task.file.Name)
+			d.logger.Info().Msgf("Downloaded %s", task.file.Key())
 			return nil
 		})
 	}
@@ -550,6 +632,72 @@ func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
 	d.completeEntry(entry)
 	d.logger.Info().Msgf("Downloaded all files for %s", entry.Name)
 	return nil
+}
+
+// downloadFileWithRetry downloads one file to destPath, bounding global concurrency
+// via globalDownloadSem and re-resolving the debrid link on failure (links expire,
+// and a large file on a slow HDD can outlive one). grab resumes full-file downloads
+// from the partial; byte-range members re-fetch (small, acceptable).
+func (d *Downloader) downloadFileWithRetry(entry *storage.Entry, file *storage.File, initialLink, destPath string, progressCallback func(int64, int64)) error {
+	ctx := d.operationContext()
+
+	// Acquire a global download slot, honoring cancellation so shutdown/restart can't
+	// block on a full+stalled semaphore.
+	select {
+	case globalDownloadSem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-globalDownloadSem }()
+
+	link := initialLink
+	var lastErr error
+	for attempt := 0; attempt < maxDownloadAttempts; attempt++ {
+		if attempt > 0 {
+			// Re-resolve the link before retrying. linkService + the account cache now
+			// treat past-ExpiresAt links as invalid and regenerate them, so this picks
+			// up a fresh link for the expiry case (and repairs/re-validates otherwise).
+			//
+			// Resolve against a snapshot copy, not the shared live entry: the link
+			// service's repair path (markEntryBad -> AddOrUpdate -> EntryToProto) marshals
+			// the entry's fields, which would race the sibling files' progress callbacks
+			// mutating SizeDownloaded/Progress/Speed/Bad on the same pointer.
+			entrySnapshot := *entry
+			dl, err := d.manager.linkService.GetLink(ctx, &entrySnapshot, file.Key())
+			if err != nil {
+				lastErr = err
+				d.logger.Warn().Msgf("re-resolve link failed for %s (attempt %d/%d): %v", file.Name, attempt+1, maxDownloadAttempts, err)
+			} else {
+				link = dl.DownloadLink
+			}
+		}
+
+		err := d.localDownloader(ctx, link, destPath, file.ByteRange, progressCallback)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		d.logger.Warn().Msgf("download attempt %d/%d failed for %s: %v", attempt+1, maxDownloadAttempts, file.Name, err)
+
+		// No point retrying into a full disk — fail fast.
+		if errors.Is(err, syscall.ENOSPC) {
+			break
+		}
+
+		if attempt < maxDownloadAttempts-1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(downloadRetryBackoff(attempt)):
+			}
+		}
+	}
+	// Permanent failure: remove the partial so it doesn't waste space on a full volume
+	// and can't be mistaken for a complete file (size-only resume) on a later re-queue.
+	if rmErr := os.Remove(destPath); rmErr != nil && !os.IsNotExist(rmErr) {
+		d.logger.Debug().Msgf("could not remove partial %s: %v", destPath, rmErr)
+	}
+	return lastErr
 }
 
 // processUsenetDownload downloads NZB files via parallel NNTP segment fetching
@@ -579,14 +727,27 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 	var progressMu sync.Mutex
 	// Track per-file progress so we can compute the global total across all files
 	fileProgress := make(map[string]int64)
+	var lastPersist time.Time
 
+	ctx := d.operationContext()
 	p := pool.New().WithErrors().WithFirstError()
 	if d.maxDownloads > 0 {
 		p = p.WithMaxGoroutines(d.maxDownloads)
 	}
 	for _, file := range files {
 		p.Go(func() error {
-			destPath := filepath.Join(downloadedFolder, file.Name)
+			// Bound total concurrent downloads process-wide (shared with HTTP path),
+			// honoring cancellation so shutdown can't block on a full semaphore.
+			select {
+			case globalDownloadSem <- struct{}{}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			defer func() { <-globalDownloadSem }()
+
+			// filepath.Base neutralizes any "../" in an untrusted file name so a member
+			// can't escape the entry's download folder.
+			destPath := filepath.Join(downloadedFolder, filepath.Base(file.Name))
 			destFile, err := os.Create(destPath)
 			if err != nil {
 				return fmt.Errorf("failed to create file %s: %w", file.Name, err)
@@ -605,10 +766,14 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 					entry.Progress = float64(entry.SizeDownloaded) / float64(totalSize)
 				}
 				entry.UpdatedAt = time.Now()
-				_ = d.manager.queue.Update(entry)
+				// Throttle persistence (see processTorrentDownload).
+				if time.Since(lastPersist) >= progressPersistInterval {
+					lastPersist = time.Now()
+					_ = d.manager.queue.Update(entry)
+				}
 			}
 
-			if err := d.manager.usenet.Download(d.manager.ctx, entry.InfoHash, file.Name, destFile, progressCallback); err != nil {
+			if err := d.manager.usenet.Download(ctx, entry.InfoHash, file.Name, destFile, progressCallback); err != nil {
 				_ = os.Remove(destPath)
 				return fmt.Errorf("failed to download %s: %w", file.Name, err)
 			}
@@ -621,8 +786,9 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 	err := p.Wait()
 
 	if err != nil {
-		entry.MarkAsError(err)
-		_ = d.manager.queue.Update(entry)
+		// markAsError (with state reset + notification) is applied uniformly by the
+		// caller (processAction) for both torrent and usenet download failures, so we
+		// only surface the error here.
 		return fmt.Errorf("NZB download failed: %w", err)
 	}
 
@@ -706,15 +872,25 @@ func (d *Downloader) detectMultiSeason(torrent *storage.Entry) (bool, []SeasonIn
 	return true, seasons
 }
 
-// localDownloader downloads a file with grab so interrupted local downloads can resume cleanly.
-func (d *Downloader) localDownloader(downloadURL, filename string, byterange *[2]int64, progressCallback func(int64, int64)) error {
+// localDownloader downloads a file with grab so interrupted local downloads can resume
+// cleanly. progressCallback receives the CUMULATIVE bytes-on-disk for this file (so
+// callers stay correct across retries/resumes). A per-attempt context aborts the
+// transfer if it stalls (no byte progress for downloadStallTimeout), since the shared
+// HTTP client has no overall timeout.
+func (d *Downloader) localDownloader(ctx context.Context, downloadURL, filename string, byterange *[2]int64, progressCallback func(int64, int64)) error {
 	startTime := time.Now()
 	requestedRange := "full"
+
+	// Per-attempt context so a stall watchdog can cancel just this transfer without
+	// tearing down the whole manager.
+	attemptCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	req, err := grab.NewRequest(filename, downloadURL)
 	if err != nil {
 		return err
 	}
-	req = req.WithContext(d.manager.ctx)
+	req = req.WithContext(attemptCtx)
 	req.BufferSize = 1 << 20
 	req.HTTPRequest.Header.Set("User-Agent", "Decypharr[QBitTorrent]")
 	req.HTTPRequest.Header.Set("Accept", "*/*")
@@ -726,16 +902,14 @@ func (d *Downloader) localDownloader(downloadURL, filename string, byterange *[2
 		req.HTTPRequest.Header.Set("Range", requestedRange)
 	}
 
-	client := grab.NewClient()
-	client.BufferSize = 1 << 20
-	client.HTTPClient = d.manager.streamClient
-
-	resp := client.Do(req)
+	resp := d.grabClient.Do(req)
 	if resp == nil {
 		return fmt.Errorf("grab returned nil response for %s", downloadURL)
 	}
 
 	var lastReported int64
+	lastAdvance := time.Now()
+	stalled := false
 	t := time.NewTicker(500 * time.Millisecond)
 	defer t.Stop()
 	defer func() {
@@ -750,18 +924,29 @@ func (d *Downloader) localDownloader(downloadURL, filename string, byterange *[2
 		case <-t.C:
 			current := resp.BytesComplete()
 			speed := int64(resp.BytesPerSecond())
-			if current != lastReported && progressCallback != nil {
-				progressCallback(current-lastReported, speed)
+			if current != lastReported {
 				lastReported = current
+				lastAdvance = time.Now()
+				if progressCallback != nil {
+					progressCallback(current, speed)
+				}
+			} else if time.Since(lastAdvance) > downloadStallTimeout {
+				// No progress for too long — likely a half-open connection. Cancel the
+				// attempt so the retry loop can re-resolve the link and try again.
+				stalled = true
+				cancel()
 			}
 		case <-resp.Done:
 			if progressCallback != nil {
 				final := resp.BytesComplete()
 				if final != lastReported {
-					progressCallback(final-lastReported, int64(resp.BytesPerSecond()))
+					progressCallback(final, int64(resp.BytesPerSecond()))
 				}
 			}
 			if err := resp.Err(); err != nil {
+				if stalled {
+					return fmt.Errorf("download stalled (no progress for %s) for %s", downloadStallTimeout, downloadURL)
+				}
 				if grab.IsStatusCodeError(err) && resp.HTTPResponse != nil {
 					return fmt.Errorf("unexpected status %d for %s", resp.HTTPResponse.StatusCode, downloadURL)
 				}

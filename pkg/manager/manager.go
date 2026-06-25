@@ -115,10 +115,13 @@ func New() *Manager {
 			MinVersion:         tls.VersionTLS12,
 			ClientSessionCache: tls.NewLRUClientSessionCache(200),
 		},
-		TLSHandshakeTimeout:    20 * time.Second,
-		MaxIdleConns:           1000,
-		MaxIdleConnsPerHost:    500,
-		MaxConnsPerHost:        500,
+		TLSHandshakeTimeout: 20 * time.Second,
+		// Right-sized for a download-to-disk client: real concurrency is bounded by
+		// globalMaxDownloads (8) plus a few link HEAD/redirect/API conns. The old
+		// 1000/500/500 was tuned for the removed high-fanout FUSE streaming workload.
+		MaxIdleConns:           64,
+		MaxIdleConnsPerHost:    16,
+		MaxConnsPerHost:        16,
 		IdleConnTimeout:        120 * time.Second,
 		DisableCompression:     false, // Enable compression for better multiplexing
 		DialContext:            dialer.DialContext,

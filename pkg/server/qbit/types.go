@@ -400,6 +400,10 @@ type TorrentFile struct {
 
 // ToQBitTorrent converts to QBitTorrent format for API compatibility
 func convertToQBitTorrentTorrent(t *storage.Entry) Torrent {
+	var completionOn int64
+	if t.CompletedAt != nil {
+		completionOn = t.CompletedAt.Unix()
+	}
 	qbitTorrent := Torrent{
 		Hash:         t.InfoHash,
 		Name:         t.Name,
@@ -413,7 +417,7 @@ func convertToQBitTorrentTorrent(t *storage.Entry) Torrent {
 		SavePath:     t.SavePath,
 		ContentPath:  t.ContentPath,
 		AddedOn:      t.CreatedAt.Unix(),
-		CompletionOn: 0,
+		CompletionOn: completionOn,
 		Debrid:       t.ActiveProvider,
 		DebridID:     "",
 		AmountLeft:   int64(float64(t.Size) * (1 - t.Progress)),

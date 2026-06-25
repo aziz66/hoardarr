@@ -292,7 +292,7 @@ func (ad *AllDebrid) flattenFiles(torrentId string, files []MagnetFile, parentPa
 				Path:      currentPath,
 				Link:      f.Link,
 			}
-			result[file.Name] = file
+			result[file.Key()] = file
 		}
 	}
 

@@ -172,8 +172,11 @@ func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "No hashes provided", http.StatusBadRequest)
 		return
 	}
+	// Honor the qBittorrent deleteFiles flag: only remove on-disk files when the client
+	// asked to. Default false (record-only) matches the qBit WebAPI contract.
+	deleteFiles := strings.ToLower(r.FormValue("deleteFiles")) == "true"
 	for _, hash := range hashes {
-		err := q.manager.Queue().Delete(hash, nil)
+		err := q.manager.Queue().DeleteRecord(hash, deleteFiles, nil)
 		if err != nil && !strings.Contains(err.Error(), "not found") {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

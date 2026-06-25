@@ -273,7 +273,7 @@ func (r *RealDebrid) getSelectedFiles(t *types.Torrent, data torrentInfo) (map[s
 			selectedFiles = append(selectedFiles, types.File{
 				TorrentId: t.Id,
 				Name:      filepath.Base(f.Path),
-				Path:      filepath.Base(f.Path),
+				Path:      f.Path, // full relative path so multi-folder files don't collide
 				Size:      f.Bytes,
 				Id:        strconv.Itoa(f.ID),
 			})
@@ -297,7 +297,7 @@ func (r *RealDebrid) getSelectedFiles(t *types.Torrent, data torrentInfo) (map[s
 	for i, f := range selectedFiles {
 		if i < len(data.Links) {
 			f.Link = data.Links[i]
-			files[f.Name] = f
+			files[f.Key()] = f
 		}
 	}
 
@@ -403,11 +403,11 @@ func (r *RealDebrid) getTorrentFiles(t *types.Torrent, data torrentInfo) map[str
 		file := types.File{
 			TorrentId: t.Id,
 			Name:      name,
-			Path:      name,
+			Path:      f.Path, // full relative path so multi-folder files don't collide
 			Size:      f.Bytes,
 			Id:        strconv.Itoa(f.ID),
 		}
-		files[name] = file
+		files[file.Key()] = file
 		idx++
 	}
 	return files
