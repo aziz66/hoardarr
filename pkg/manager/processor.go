@@ -182,8 +182,12 @@ func (m *Manager) processQueuedDebridUsenet(entry *storage.Entry) {
 	}
 
 	if t.Status == debridTypes.TorrentStatusError {
-		m.logger.Error().Str("debrid", entry.ActiveProvider).Str("name", entry.Name).Msg("Usenet download failed on debrid")
-		entry.MarkAsError(fmt.Errorf("usenet download failed on debrid: %s", entry.ActiveProvider))
+		reason := t.StatusReason
+		if reason == "" {
+			reason = "unknown reason"
+		}
+		m.logger.Error().Str("debrid", entry.ActiveProvider).Str("name", entry.Name).Str("reason", reason).Msg("Usenet download failed on debrid")
+		entry.MarkAsError(fmt.Errorf("usenet download failed on %s: %s", entry.ActiveProvider, reason))
 		_ = m.queue.Update(entry)
 		go func() { _ = uc.DeleteUsenetDownload(placement.ID) }()
 		return

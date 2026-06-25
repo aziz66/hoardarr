@@ -48,6 +48,8 @@ type Torbox struct {
 	downloadPresentCache  sync.Map
 	downloadPresentMu     sync.Mutex
 	downloadPresentLoaded bool
+	createTorrentLimiter  *createRateLimiter
+	createUsenetLimiter   *createRateLimiter
 }
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
@@ -85,6 +87,10 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                request.New(opts...),
 		logger:                _log,
+		// TorBox caps createtorrent and createusenetdownload at 60/hour each; stay a
+		// little under to leave headroom and fail adds fast (not block/hammer) when spent.
+		createTorrentLimiter: newCreateRateLimiter(55, time.Hour),
+		createUsenetLimiter:  newCreateRateLimiter(55, time.Hour),
 	}
 	return tb, nil
 }
@@ -227,6 +233,10 @@ func (tb *Torbox) IsAvailable(hashes []string) map[string]bool {
 }
 
 func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
+	if tb.createTorrentLimiter != nil && !tb.createTorrentLimiter.Allow() {
+		wait := tb.createTorrentLimiter.RetryAfter().Round(time.Minute)
+		return nil, fmt.Errorf("torbox createtorrent hourly limit reached (60/hr); retry in ~%s", wait)
+	}
 	var data AddMagnetResponse
 
 	formData := map[string]string{

@@ -95,6 +95,10 @@ func (tb *Torbox) SubmitNZB(name string, content []byte) (string, error) {
 	if len(content) == 0 {
 		return "", fmt.Errorf("torbox usenet: empty NZB content")
 	}
+	if tb.createUsenetLimiter != nil && !tb.createUsenetLimiter.Allow() {
+		wait := tb.createUsenetLimiter.RetryAfter().Round(time.Minute)
+		return "", fmt.Errorf("torbox createusenetdownload hourly limit reached (60/hr); retry in ~%s", wait)
+	}
 	filename := name
 	if !strings.HasSuffix(strings.ToLower(filename), ".nzb") {
 		filename += ".nzb"
@@ -139,8 +143,12 @@ func (tb *Torbox) GetUsenetTorrent(usenetID string) (*types.Torrent, error) {
 	// treat finished-but-empty as still in progress until the files appear (so we
 	// don't finalize with zero files and an empty symlink folder).
 	status := tb.getTorboxStatus(data.DownloadState, data.DownloadFinished)
+	statusReason := ""
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(data.DownloadState)), "failed") {
 		status = types.TorrentStatusError
+		// Carry TorBox's own reason ("failed (Aborted, cannot be completed)", "failed
+		// (RAR files failed to verify)", ...) so the failure isn't opaque downstream.
+		statusReason = strings.TrimSpace(data.DownloadState)
 	} else if status == types.TorrentStatusDownloaded && len(data.Files) == 0 {
 		status = types.TorrentStatusDownloading
 	}
@@ -153,6 +161,7 @@ func (tb *Torbox) GetUsenetTorrent(usenetID string) (*types.Torrent, error) {
 		Size:             data.Size,
 		Progress:         data.Progress * 100,
 		Status:           status,
+		StatusReason:     statusReason,
 		Speed:            data.DownloadSpeed,
 		Filename:         data.Name,
 		OriginalFilename: data.Name,

@@ -872,6 +872,22 @@ func (d *Downloader) detectMultiSeason(torrent *storage.Entry) (bool, []SeasonIn
 	return true, seasons
 }
 
+// redactURL masks the debrid API token in a download URL so it never leaks into error
+// messages, logs, or the *arr's blocklist UI (the requestdl link carries ?token=<key>).
+func redactURL(rawurl string) string {
+	u, err := url.Parse(rawurl)
+	if err != nil {
+		return rawurl
+	}
+	q := u.Query()
+	if q.Get("token") == "" {
+		return rawurl
+	}
+	q.Set("token", "REDACTED")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // localDownloader downloads a file with grab so interrupted local downloads can resume
 // cleanly. progressCallback receives the CUMULATIVE bytes-on-disk for this file (so
 // callers stay correct across retries/resumes). A per-attempt context aborts the
@@ -904,7 +920,7 @@ func (d *Downloader) localDownloader(ctx context.Context, downloadURL, filename 
 
 	resp := d.grabClient.Do(req)
 	if resp == nil {
-		return fmt.Errorf("grab returned nil response for %s", downloadURL)
+		return fmt.Errorf("grab returned nil response for %s", redactURL(downloadURL))
 	}
 
 	var lastReported int64
@@ -945,10 +961,10 @@ func (d *Downloader) localDownloader(ctx context.Context, downloadURL, filename 
 			}
 			if err := resp.Err(); err != nil {
 				if stalled {
-					return fmt.Errorf("download stalled (no progress for %s) for %s", downloadStallTimeout, downloadURL)
+					return fmt.Errorf("download stalled (no progress for %s) for %s", downloadStallTimeout, redactURL(downloadURL))
 				}
 				if grab.IsStatusCodeError(err) && resp.HTTPResponse != nil {
-					return fmt.Errorf("unexpected status %d for %s", resp.HTTPResponse.StatusCode, downloadURL)
+					return fmt.Errorf("unexpected status %d for %s", resp.HTTPResponse.StatusCode, redactURL(downloadURL))
 				}
 				return err
 			}

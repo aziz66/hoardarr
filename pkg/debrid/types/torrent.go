@@ -20,6 +20,7 @@ type Torrent struct {
 	Magnet           *utils.Magnet   `json:"magnet"`
 	Files            map[string]File `json:"files"`
 	Status           TorrentStatus   `json:"status"`
+	StatusReason     string          `json:"status_reason,omitempty"` // provider-supplied reason on failure (e.g. TorBox download_state)
 	Added            time.Time       `json:"added"`
 	Progress         float64         `json:"progress"`
 	Speed            int64           `json:"speed"`
