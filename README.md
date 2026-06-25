@@ -1,9 +1,9 @@
-# Hoarder
+# Hoardarr
 
-> **Hoarder** is a fork of [Decypharr](https://github.com/sirrobot01/decypharr) by **sirrobot01**,
+> **Hoardarr** is a fork of [Decypharr](https://github.com/sirrobot01/decypharr) by **sirrobot01**,
 > converted into a **download-to-disk** debrid client for the *arr apps. Instead of streaming from a
 > FUSE mount, it downloads **owned files to local storage** (torrent + usenet; multi-provider:
-> TorBox / Real-Debrid / Premiumize). The app/binary is **`hoardarr`**.
+> TorBox / Real-Debrid / Premiumize).
 >
 > **What differs from upstream Decypharr:**
 > - The FUSE/streaming mount layer (`pkg/mount/*`) is **removed** — Hoarder writes real files to disk
