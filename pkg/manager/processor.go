@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -395,6 +396,10 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 		return nil, fmt.Errorf("no debrid clients available")
 	}
 
+	// Order providers cache-first, then by config priority (TorBox configured last keeps
+	// its scarce create budget for usenet).
+	clients = m.orderDebridClients(clients, debridTorrent.InfoHash)
+
 	errs := make([]error, 0, len(clients))
 
 	for _, db := range clients {
@@ -445,4 +450,50 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 	}
 	joinedErrors := errors.Join(errs...)
 	return nil, fmt.Errorf("failed to process torrent: %w", joinedErrors)
+}
+
+// orderDebridClients decides the order to try debrid providers for a torrent:
+//  1. deterministic config priority (the order in config.debrids — put TorBox last to
+//     reserve its 60/hour create budget for usenet), then
+//  2. cache-first: providers that already have the release CACHED are tried before those
+//     that would need an uncached download. Within each bucket, config priority is kept.
+//
+// Net effect: a popular release goes to the highest-priority provider that has it cached
+// (usually Real-Debrid/Premiumize); TorBox is only used for a torrent when it is the sole
+// cached option or the others fail. IsAvailable failures are treated as "not cached".
+func (m *Manager) orderDebridClients(clients []common.Client, infohash string) []common.Client {
+	priority := make(map[string]int, len(config.Get().Debrids))
+	for i, dc := range config.Get().Debrids {
+		priority[dc.Name] = i
+	}
+	sort.SliceStable(clients, func(i, j int) bool {
+		return priority[clients[i].Config().Name] < priority[clients[j].Config().Name]
+	})
+
+	if len(clients) < 2 || infohash == "" {
+		return clients
+	}
+
+	var cached, uncached []common.Client
+	for _, c := range clients {
+		isCached := false
+		// We pass a single hash, so any true value in the result means it's cached
+		// (sidesteps hash-case differences between providers).
+		for _, ok := range c.IsAvailable([]string{infohash}) {
+			if ok {
+				isCached = true
+				break
+			}
+		}
+		if isCached {
+			cached = append(cached, c)
+		} else {
+			uncached = append(uncached, c)
+		}
+	}
+	ordered := append(cached, uncached...)
+	if len(cached) > 0 {
+		m.logger.Debug().Str("infohash", infohash).Str("cached_on", cached[0].Config().Name).Msg("torrent cached; preferring cached provider")
+	}
+	return ordered
 }
